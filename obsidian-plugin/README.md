@@ -2,6 +2,8 @@
 
 Obsidian plugin that shows due Minerva spaced-repetition cards and the last 5 session summaries.
 Read-only: it only reads `000-Meta/minerva/cards.json` and `000-Meta/minerva/sessions.jsonl` written by Minerva's CLI.
+It also shows a mastery dashboard (per-subject concept mastery bars from `000-Meta/minerva/model.json`)
+and a proposals inbox listing `000-Meta/minerva/proposals/*.md` with their frontmatter status; click to open.
 
 Install:
 1. Copy this folder to `<your-vault>/.obsidian/plugins/minerva-reviews/`.

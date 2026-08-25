@@ -1,10 +1,12 @@
-import { Plugin, ItemView, Notice, requestUrl } from "obsidian";
+import { Plugin, ItemView, Notice, TFolder, requestUrl } from "obsidian";
 
 // ponytail: no settings tab, no styles.css, no manifest icons. One view, done.
 
 const VIEW_TYPE = "minerva-reviews-view";
 const CARDS_PATH = "000-Meta/minerva/cards.json";
 const SESSIONS_PATH = "000-Meta/minerva/sessions.jsonl";
+const MODEL_PATH = "000-Meta/minerva/model.json";
+const PROPOSALS_PATH = "000-Meta/minerva/proposals";
 
 class MinervaReviewsView extends ItemView {
 	constructor(leaf: any) {
@@ -57,6 +59,8 @@ class MinervaReviewsView extends ItemView {
 			});
 
 			this.renderSessions(root);
+			await this.renderModel(root);
+			this.renderProposals(root);
 		} catch (e) {
 			new Notice(`Minerva Reviews: ${e.message}`);
 		}
@@ -90,6 +94,78 @@ class MinervaReviewsView extends ItemView {
 			}
 		} catch (e) {
 			new Notice(`Minerva Reviews: could not read sessions: ${e.message}`);
+		}
+	}
+
+	private async renderModel(root: HTMLElement) {
+		try {
+			const file = this.app.vault.getAbstractFileByPath(MODEL_PATH);
+			if (!file) {
+				root.createEl("p", { text: "No learner model yet.", cls: "mod-muted" });
+				return;
+			}
+			const raw = await this.app.vault.read(file as any);
+			const model = JSON.parse(raw);
+			const subjects = Object.keys(model.subjects ?? {}).sort();
+			if (!subjects.length) {
+				root.createEl("p", { text: "No learner model yet.", cls: "mod-muted" });
+				return;
+			}
+			root.createEl("h3", { text: "Mastery" });
+			for (const subject of subjects) {
+				root.createEl("h4", { text: subject });
+				const concepts = (model.subjects[subject] as any[])
+					.slice()
+					.sort((a, b) => (a.mastery ?? 0) - (b.mastery ?? 0));
+				for (const c of concepts) {
+					const mastery = Math.max(0, Math.min(1, Number(c.mastery) || 0));
+					const row = root.createDiv();
+					const bar = row.createDiv();
+					bar.style.width = `${mastery * 100}%`;
+					bar.style.height = "6px";
+					bar.style.background = mastery < 0.4 ? "#e05252" : mastery <= 0.7 ? "#e0b84d" : "#5cb85c";
+					row.createSpan({ text: ` ${c.concept} (${Math.round(mastery * 100)}%)` });
+				}
+			}
+		} catch (e) {
+			new Notice(`Minerva Reviews: could not read learner model: ${e.message}`);
+		}
+	}
+
+	private renderProposals(root: HTMLElement) {
+		try {
+			const folder = this.app.vault.getAbstractFileByPath(PROPOSALS_PATH);
+			if (!(folder instanceof TFolder)) return; // ponytail: no proposals folder yet, silence is fine.
+			const files = folder.children
+				.filter((f: any) => f.name?.endsWith(".md"))
+				.map((f: any) => f.name)
+				.sort();
+			if (!files.length) return;
+			root.createEl("h3", { text: `Proposals (${files.length})` });
+			for (const name of files) {
+				let status = "proposed";
+				try {
+					const file = this.app.vault.getAbstractFileByPath(`${PROPOSALS_PATH}/${name}`);
+					if (file) {
+						// ponytail: frontmatter via MetadataCache, no manual YAML parsing.
+						const fm = this.app.metadataCache.getFileCache(file as any)?.frontmatter;
+						status = String(fm?.status ?? "proposed");
+					}
+				} catch {
+					// keep default
+				}
+				const item = root.createDiv();
+				item.createSpan({ text: `${name} [${status}]` });
+				item.addEventListener("click", () => {
+					try {
+						this.app.workspace.openLinkText(`${PROPOSALS_PATH}/${name}`, "", false);
+					} catch (e) {
+						new Notice(`Minerva Reviews: could not open proposal: ${e.message}`);
+					}
+				});
+			}
+		} catch (e) {
+			new Notice(`Minerva Reviews: could not read proposals: ${e.message}`);
 		}
 	}
 

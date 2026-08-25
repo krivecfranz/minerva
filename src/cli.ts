@@ -6,7 +6,10 @@ import { Session } from "./core/session.ts";
 import { runTurn, tutorSystem } from "./core/agent.ts";
 import { runSubAgent, loadAgents } from "./core/subagents.ts";
 import { discoverSkills, skillsSystemPrompt, loadSkillBody } from "./core/skills.ts";
+import { recordExamResult, topicWeaknesses, examSystemContext } from "./core/exam.ts";
 import { newCard, isDue, sortDue, gradeCard, type MinervaCard } from "./core/scheduler.ts";
+import { loadStrategies, recordOutcome, strategyRotationHint, STRATEGY_NAMES } from "./core/strategies.ts";
+import { readSessionLogs, loadCurrentPrompts, writeProposal, buildRetrospectPrompt } from "./core/retrospect.ts";
 import { OpenRouterAdapter } from "./providers/openrouter.ts";
 import { OllamaAdapter } from "./providers/ollama.ts";
 import { MockAdapter } from "./providers/mock.ts";
@@ -164,6 +167,95 @@ for await (const line of rl) {
       console.log(green(`added ${parsed.length} cards (deck: ${deck.length})`));
     } catch {
       console.log(red("card-writer returned invalid JSON:\n" + result.slice(0, 400)));
+    }
+    promptSafe();
+    continue;
+  }
+  if (input.startsWith("/strat")) {
+    // RSI level 3: query/log which explanation strategy works per concept
+    if (!vault) {
+      console.log(red("MINERVA_VAULT not set - no strategies.json location"));
+      promptSafe();
+      continue;
+    }
+    const m = /^\/strat(?:log)?\s+(\S+)(?:\s+(\S+)(?:\s+(yes|no))?)?$/.exec(input);
+    if (!m) {
+      console.log(red("usage: /strat <concept> | /stratlog <concept> <strategy> <yes|no>"));
+      console.log(dim(`strategies: ${STRATEGY_NAMES.join(", ")}`));
+    } else if (input.startsWith("/stratlog") && m[2] && m[3]) {
+      await recordOutcome(vault, m[1], m[2], m[3] === "yes");
+      console.log(green(`recorded: ${m[2]} on "${m[1]}" -> ${m[3]}`));
+    } else if (input.startsWith("/stratlog")) {
+      console.log(red("usage: /stratlog <concept> <strategy> <yes|no>"));
+    } else {
+      const store = await loadStrategies(vault);
+      const hint = strategyRotationHint(store[m[1]], m[1]);
+      console.log(hint ?? dim(`no data for "${m[1]}" yet - record outcomes with /stratlog`));
+    }
+    promptSafe();
+    continue;
+  }
+  if (input === "/retrospect") {
+    if (!vault) {
+      console.log(red("MINERVA_VAULT not set - no proposals directory"));
+      promptSafe();
+      continue;
+    }
+    const agent = agents.find((a) => a.name === "retrospect");
+    if (!agent) {
+      console.log(red("no retrospect agent found"));
+      promptSafe();
+      continue;
+    }
+    console.log(cyan("minerva > analyzing session history..."));
+    const [logs, inventory] = await Promise.all([
+      readSessionLogs(vault),
+      loadCurrentPrompts(["./skills"], "./agents"),
+    ]);
+    if (!logs.length) {
+      console.log(dim("no session logs yet - nothing to analyze"));
+      promptSafe();
+      continue;
+    }
+    const { result } = await runSubAgent(adapter, agent, buildRetrospectPrompt(logs, inventory));
+    try {
+      const p = await writeProposal(vault, `retrospect-${new Date().toISOString().slice(0, 10)}`, result);
+      console.log(green(`proposal written: ${p}`));
+    } catch (e) {
+      console.log(red(`proposal failed: ${e instanceof Error ? e.message : e}`));
+    }
+    promptSafe();
+    continue;
+  }
+  if (input === "/examstats") {
+    if (!vault) {
+      console.log(red("MINERVA_VAULT not set - no exams.jsonl location"));
+      promptSafe();
+      continue;
+    }
+    const weak = await topicWeaknesses(vault);
+    if (!weak.length) console.log(dim("no exam data"));
+    else console.table(weak.map((w) => ({ topic: w.topic, correct: Math.round(w.rate * 100) + "%" })));
+    // ponytail: re-inject exam context into the system prompt for subsequent turns
+    system = tutorSystem(skillsSystemPrompt(skills));
+    const ctx = await examSystemContext(vault);
+    if (ctx) system += "\n\n" + ctx;
+    promptSafe();
+    continue;
+  }
+  if (input.startsWith("/logexam")) {
+    if (!vault) {
+      console.log(red("MINERVA_VAULT not set - no exams.jsonl location"));
+      promptSafe();
+      continue;
+    }
+    // ponytail: grading stays conversational, this just records the result
+    const m = /^\/logexam\s+(\S+)\s+(\d+)\s*\/\s*(\d+)$/.exec(input);
+    if (!m || +m[3] < 1 || +m[2] > +m[3]) {
+      console.log(red("usage: /logexam <topic> <correct>/<total>"));
+    } else {
+      await recordExamResult(vault, { topic: m[1], correct: +m[2], total: +m[3], date: new Date().toISOString() });
+      console.log(green(`logged ${m[2]}/${m[3]} for ${m[1]}`));
     }
     promptSafe();
     continue;
