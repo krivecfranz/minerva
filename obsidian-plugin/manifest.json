@@ -1,0 +1,9 @@
+{
+	"id": "minerva-reviews",
+	"name": "Minerva Reviews",
+	"version": "0.1.0",
+	"minAppVersion": "1.5.0",
+	"description": "Shows due Minerva spaced-repetition reviews and session stats.",
+	"author": "Phinon",
+	"isDesktopOnly": true
+}

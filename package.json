@@ -1,0 +1,13 @@
+{
+  "name": "minerva",
+  "version": "0.0.1",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node src/cli.ts",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "ts-fsrs": "^5.4.1"
+  }
+}
