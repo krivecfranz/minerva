@@ -57,16 +57,19 @@ function messageToOpenAi(message: Message): Record<string, unknown> {
   return out;
 }
 
+// ponytail: also serves LM Studio and any other OpenAI-compatible /chat/completions server - same wire format, no key needed.
 export class OpenRouterAdapter implements LlmAdapter {
+  private readonly baseUrl: string;
   private readonly apiKey?: string;
 
-  constructor(apiKey?: string) {
+  constructor(baseUrl = "https://openrouter.ai/api/v1", apiKey?: string) {
+    this.baseUrl = baseUrl;
     this.apiKey = apiKey ?? process.env.OPENROUTER_API_KEY;
   }
 
   async *stream(options: GenerateOptions): AsyncGenerator<StreamChunk> {
     const apiKey = this.apiKey;
-    if (!apiKey) {
+    if (!apiKey && this.baseUrl.includes("openrouter.ai")) {
       throw new Error("OpenRouter API key missing: pass it to the constructor or set OPENROUTER_API_KEY");
     }
 
@@ -89,11 +92,11 @@ export class OpenRouterAdapter implements LlmAdapter {
 
     let response: Response;
     try {
-      response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      response = await fetch(`${this.baseUrl}/chat/completions`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json",
+          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
         },
         body: JSON.stringify(body),
         signal: options.signal,

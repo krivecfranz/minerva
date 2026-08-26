@@ -14,6 +14,7 @@ import { OpenRouterAdapter } from "./providers/openrouter.ts";
 import { OllamaAdapter } from "./providers/ollama.ts";
 import { MockAdapter } from "./providers/mock.ts";
 import { model as defaultModel } from "./config.ts";
+import { pickModel, type PickOption } from "./ui/picker.ts";
 import webFetch from "./tools/webfetch.ts";
 import webSearch from "./tools/websearch.ts";
 import vaultTools from "./tools/vault.ts";
@@ -24,8 +25,10 @@ import type { ToolDef } from "./tools/types.ts";
 const tools: ToolDef[] = [webSearch, webFetch, ...youtubeTools];
 if (process.env.MINERVA_VAULT) tools.push(...vaultTools, vaultWrite);
 const ollamaBaseUrl = process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
+const lmstudioBaseUrl = process.env.LMSTUDIO_BASE_URL ?? "http://localhost:1234/v1";
 function makeAdapter(p: string) {
   if (p === "ollama") return new OllamaAdapter(ollamaBaseUrl);
+  if (p === "lmstudio") return new OpenRouterAdapter(lmstudioBaseUrl);
   if (p === "mock") return new MockAdapter();
   if (process.env.OPENROUTER_API_KEY) return new OpenRouterAdapter();
   return new MockAdapter();
@@ -33,11 +36,25 @@ function makeAdapter(p: string) {
 let provider = process.env.MINERVA_PROVIDER ?? "auto";
 let adapter = makeAdapter(provider);
 let currentModel = process.env.MINERVA_MODEL ?? defaultModel;
-async function listOllamaModels(): Promise<string[]> {
-  const res = await fetch(`${ollamaBaseUrl}/api/tags`);
-  const { models } = (await res.json()) as { models: { name: string }[] };
-  return models.map((m) => m.name);
+const PROVIDERS = ["ollama", "lmstudio", "mock", "openrouter"];
+
+// ponytail: 1.5s timeout per source - an unreachable local server must not hang the picker
+async function listModels(category: string, url: string, key: "models" | "data", field: string): Promise<PickOption[]> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(1500) });
+    const body = (await res.json()) as Record<string, { name?: string; id?: string }[]>;
+    return (body[key] ?? []).map((m) => ({
+      category,
+      title: (m as Record<string, string>)[field],
+      value: { provider: category, model: (m as Record<string, string>)[field] },
+    }));
+  } catch {
+    return [];
+  }
 }
+const listOllamaModels = () => listModels("ollama", `${ollamaBaseUrl}/api/tags`, "models", "name");
+const listLmStudioModels = () => listModels("lmstudio", `${lmstudioBaseUrl}/models`, "data", "id");
+const listOpenRouterModels = () => listModels("openrouter", "https://openrouter.ai/api/v1/models", "data", "id");
 const vault = process.env.MINERVA_VAULT ? path.resolve(process.env.MINERVA_VAULT) : undefined;
 const deckFile = vault ? path.join(vault, "000-Meta", "minerva", "cards.json") : undefined;
 
@@ -130,17 +147,24 @@ for await (const line of rl) {
   if (input.startsWith("/model")) {
     const arg = input.slice(6).trim();
     if (!arg) {
-      console.log(cyan(`provider: ${provider} - model: ${currentModel}`));
-      if (provider === "ollama") {
-        try {
-          console.log(dim(`available: ${(await listOllamaModels()).join(", ")}`));
-        } catch (e) {
-          console.log(red(`could not reach ollama: ${e instanceof Error ? e.message : e}`));
-        }
+      console.log(dim(`current: ${provider}:${currentModel} - looking for local + remote models...`));
+      const [ollama, lmstudio, openrouter] = await Promise.all([
+        listOllamaModels(),
+        listLmStudioModels(),
+        listOpenRouterModels(),
+      ]);
+      const picked = await pickModel([...ollama, ...lmstudio, ...openrouter]);
+      if (picked) {
+        provider = picked.provider;
+        adapter = makeAdapter(provider);
+        currentModel = picked.model;
+        console.log(green(`-> provider: ${provider} - model: ${currentModel}`));
+      } else {
+        console.log(dim("cancelled"));
       }
     } else {
       const [maybeProvider, ...rest] = arg.split(":");
-      if (rest.length && ["ollama", "openrouter", "mock"].includes(maybeProvider)) {
+      if (rest.length && PROVIDERS.includes(maybeProvider)) {
         provider = maybeProvider;
         adapter = makeAdapter(provider);
         currentModel = rest.join(":");
