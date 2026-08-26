@@ -38,7 +38,7 @@ export async function* runTurn(
   history: Message[],
   input: string,
   tools: ToolDef[],
-  opts?: { system?: string; signal?: AbortSignal },
+  opts?: { system?: string; signal?: AbortSignal; model?: string },
 ): AsyncGenerator<LoopEvent> {
   const userMsg: Message = { role: "user", content: [{ type: "text", text: input }] };
   await session.append("message", userMsg);
@@ -49,7 +49,7 @@ export async function* runTurn(
 
   for (let step = 0; step < MAX_STEPS; step++) {
     const genOpts: GenerateOptions = {
-      model,
+      model: opts?.model ?? model,
       messages,
       maxTokens,
       system: opts?.system ?? tutorSystem(),

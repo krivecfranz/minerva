@@ -13,6 +13,7 @@ import { readSessionLogs, loadCurrentPrompts, writeProposal, buildRetrospectProm
 import { OpenRouterAdapter } from "./providers/openrouter.ts";
 import { OllamaAdapter } from "./providers/ollama.ts";
 import { MockAdapter } from "./providers/mock.ts";
+import { model as defaultModel } from "./config.ts";
 import webFetch from "./tools/webfetch.ts";
 import webSearch from "./tools/websearch.ts";
 import vaultTools from "./tools/vault.ts";
@@ -22,13 +23,21 @@ import type { ToolDef } from "./tools/types.ts";
 
 const tools: ToolDef[] = [webSearch, webFetch, ...youtubeTools];
 if (process.env.MINERVA_VAULT) tools.push(...vaultTools, vaultWrite);
-const adapter = (() => {
-  const p = process.env.MINERVA_PROVIDER ?? "auto";
-  if (p === "ollama") return new OllamaAdapter();
+const ollamaBaseUrl = process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
+function makeAdapter(p: string) {
+  if (p === "ollama") return new OllamaAdapter(ollamaBaseUrl);
   if (p === "mock") return new MockAdapter();
   if (process.env.OPENROUTER_API_KEY) return new OpenRouterAdapter();
   return new MockAdapter();
-})();
+}
+let provider = process.env.MINERVA_PROVIDER ?? "auto";
+let adapter = makeAdapter(provider);
+let currentModel = process.env.MINERVA_MODEL ?? defaultModel;
+async function listOllamaModels(): Promise<string[]> {
+  const res = await fetch(`${ollamaBaseUrl}/api/tags`);
+  const { models } = (await res.json()) as { models: { name: string }[] };
+  return models.map((m) => m.name);
+}
 const vault = process.env.MINERVA_VAULT ? path.resolve(process.env.MINERVA_VAULT) : undefined;
 const deckFile = vault ? path.join(vault, "000-Meta", "minerva", "cards.json") : undefined;
 
@@ -118,6 +127,31 @@ for await (const line of rl) {
     continue;
   }
   if (input === "/exit") break;
+  if (input.startsWith("/model")) {
+    const arg = input.slice(6).trim();
+    if (!arg) {
+      console.log(cyan(`provider: ${provider} - model: ${currentModel}`));
+      if (provider === "ollama") {
+        try {
+          console.log(dim(`available: ${(await listOllamaModels()).join(", ")}`));
+        } catch (e) {
+          console.log(red(`could not reach ollama: ${e instanceof Error ? e.message : e}`));
+        }
+      }
+    } else {
+      const [maybeProvider, ...rest] = arg.split(":");
+      if (rest.length && ["ollama", "openrouter", "mock"].includes(maybeProvider)) {
+        provider = maybeProvider;
+        adapter = makeAdapter(provider);
+        currentModel = rest.join(":");
+      } else {
+        currentModel = arg;
+      }
+      console.log(green(`-> provider: ${provider} - model: ${currentModel}`));
+    }
+    promptSafe();
+    continue;
+  }
   if (input === "/review") {
     if (!vault) {
       console.log(red("MINERVA_VAULT not set - no deck location"));
@@ -262,7 +296,7 @@ for await (const line of rl) {
   }
   process.stdout.write(cyan("minerva > "));
   try {
-    for await (const ev of runTurn(adapter, session, history, input, tools, { system })) {
+    for await (const ev of runTurn(adapter, session, history, input, tools, { system, model: currentModel })) {
       if (ev.type === "text_delta") process.stdout.write(ev.text);
       else if (ev.type === "tool_start") console.log(dim(`\n[tool] ${ev.call.name}(${ev.call.args.slice(0, 80)})`));
       else {
