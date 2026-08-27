@@ -4,8 +4,8 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "node src/cli.ts",
-    "test": "node --test test/"
+    "start": "node --env-file-if-exists=.env src/cli.ts",
+    "test": "node --env-file-if-exists=.env --test 'test/*.ts'"
   },
   "dependencies": {
     "ts-fsrs": "^5.4.1"

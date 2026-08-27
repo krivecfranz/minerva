@@ -203,7 +203,9 @@ export const PERSONAS: Persona[] = [
 // ponytail: direct-run entry, no test framework needed
 if (import.meta.main) {
   const key = process.env.OPENROUTER_API_KEY;
-  const adapter = key ? new OpenRouterAdapter(key) : new MockAdapter();
+  // first arg is the base url, the key is the second - passing the key as the url
+  // made every real-model eval run die on 'Failed to parse URL'
+  const adapter = key ? new OpenRouterAdapter(undefined, key) : new MockAdapter();
   if (!key) console.log("evals: no key - use MockAdapter (behavioral checks limited)");
 
   let failed = false;

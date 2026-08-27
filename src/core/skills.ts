@@ -19,7 +19,8 @@ function parseSkillFile(raw: string, path: string): Skill | undefined {
   const meta: Record<string, string> = {};
   for (const line of match[1].split(/\r?\n/)) {
     const i = line.indexOf(":");
-    if (i > 0) meta[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+    // ponytail: strip the quotes a quoted yaml scalar leaves behind
+    if (i > 0) meta[line.slice(0, i).trim()] = line.slice(i + 1).trim().replace(/^["'](.*)["']$/, "$1");
   }
   const { name, description } = meta;
   if (!name || !description) return undefined;

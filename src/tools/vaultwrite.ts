@@ -1,4 +1,4 @@
-import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { defineTool } from "./types.ts";
 
@@ -15,6 +15,18 @@ type Mode = (typeof MODES)[number];
 function hasMinervaOrigin(raw: string): boolean {
   const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(raw);
   return Boolean(m && /^origin:\s*minerva\s*$/m.test(m[1]));
+}
+
+// Minerva's own notes must always be identifiable. A note that carries its own
+// frontmatter gets the marker spliced into that block - prepending a second
+// frontmatter block would corrupt the note, and skipping it (the old behaviour)
+// made minerva's notes indistinguishable from human ones and locked her out.
+function withOrigin(raw: string): string {
+  if (hasMinervaOrigin(raw)) return raw;
+  const stamp = `origin: minerva\ntimestamp: ${new Date().toISOString()}\n`;
+  const head = /^---\r?\n/.exec(raw);
+  if (head) return raw.slice(0, head[0].length) + stamp + raw.slice(head[0].length);
+  return `---\n${stamp}---\n\n${raw}`;
 }
 
 const vaultWrite = defineTool({
@@ -57,32 +69,40 @@ const vaultWrite = defineTool({
     let abs = path.resolve(root, norm);
     if (!abs.startsWith(root + path.sep)) throw new Error(`Path escapes vault root: ${rel}`);
 
-    // Escape check BEFORE mkdir so failed writes cannot create dirs outside the vault.
+    // Resolve the deepest EXISTING ancestor and check it BEFORE mkdir - otherwise a
+    // symlinked parent gets directories created outside the vault before we refuse.
+    let probe = path.dirname(abs);
+    while (!(await stat(probe).then(() => true).catch(() => false))) {
+      const up = path.dirname(probe);
+      if (up === probe) break;
+      probe = up;
+    }
+    const probeReal = await realpath(probe).catch(() => probe);
+    if (probeReal !== root && !probeReal.startsWith(root + path.sep)) {
+      throw new Error(`Path escapes vault root: ${rel}`);
+    }
+
     await mkdir(path.dirname(abs), { recursive: true });
     abs = path.join(await realpath(path.dirname(abs)), path.basename(abs));
     if (!abs.startsWith(root + path.sep)) throw new Error(`Path escapes vault root: ${rel}`);
 
+    // lstat, not stat: a symlink pointing at a file that does not exist yet reports
+    // ENOENT through stat, which used to skip this guard entirely and let writeFile
+    // follow the link out of the vault.
+    const link = await lstat(abs).then((s) => s.isSymbolicLink()).catch(() => false);
+    if (link) throw new Error(`Refusing to write through symlink: ${rel}`);
+
     const exists = await stat(abs).then(() => true).catch(() => false);
-    let isMinervaNote = false;
     if (exists) {
-      // Symlinked .md inside allowed dirs must not redirect writes out of the vault.
-      if (!(await realpath(abs)).startsWith(root + path.sep)) {
-        throw new Error(`Refusing to write through symlink outside vault: ${rel}`);
-      }
-      isMinervaNote = hasMinervaOrigin(await readFile(abs, "utf8"));
-      if (!isMinervaNote) {
+      if (!hasMinervaOrigin(await readFile(abs, "utf8"))) {
         throw new Error(`Refusing to modify existing human note without 'origin: minerva' frontmatter: ${rel}`);
       }
     }
 
     let content = String(args.content);
-    // Keep the origin marker intact across rewrites - otherwise a note loses its
-    // minerva identity on the first overwrite and becomes untouchable.
-    // (append never needs it: the marker lives at the top of the existing file)
-    const needsOrigin = mode !== "append" && (exists ? !hasMinervaOrigin(content) : !content.startsWith("---"));
-    if (needsOrigin) {
-      content = `---\norigin: minerva\ntimestamp: ${new Date().toISOString()}\n---\n\n${content}`;
-    }
+    // Append onto an existing file is the only case that needs no marker - it is
+    // already at the top of that file. Appending to a NEW file does need one.
+    if (mode !== "append" || !exists) content = withOrigin(content);
 
     if (mode === "append") {
       const old = exists ? await readFile(abs, "utf8") : "";

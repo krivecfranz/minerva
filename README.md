@@ -14,8 +14,9 @@ Core design rule taken from the research corpus:
 
 ## Features
 
-- **Agent loop** with tool execution, crash-resumable JSONL sessions
-  (user message hits disk before the first API call)
+- **Agent loop** with tool execution and append-only JSONL session
+  transcripts (user message hits disk before the first API call). The format
+  is resumable; a `--resume` entry point does not exist yet.
 - **Provider seam** - swap models via config, not code:
   OpenRouter (any cloud model), Ollama (local), or a keyless mock for tests
 - **Tools**: web search + fetch, YouTube transcripts via yt-dlp,
@@ -28,8 +29,8 @@ Core design rule taken from the research corpus:
   `exam` (timed simulation with strict grading)
 - **FSRS spaced repetition** built in (`ts-fsrs`): `/mkcards` generates cards
   from material, `/review` runs interleaved review sessions
-- **Learner model** persisted inside your Obsidian vault
-  (`000-Meta/minerva/`), mastery updates require evidence
+- **Learner model** module with evidence-gated mastery updates
+  (`src/core/learner.ts`) - written, but not yet wired into the session loop
 - **Eval suite**: scripted learner personas check that the tutor actually
   follows its pedagogy rules against real models
 
@@ -52,18 +53,25 @@ export MINERVA_VAULT_WRITE_DIRS="000-Meta/minerva,100-Concepts,200-Sources,900-R
 npm start
 ```
 
+`/dictate` additionally needs `ffmpeg` (recording) and `whisper` (local
+transcription) on your PATH. Both are optional - everything else runs without them.
+
 Session commands:
+
+`/help` lists them in the app; typing `/` shows matching commands and Tab completes.
 
 | Command | Purpose |
 |---|---|
-| `/skill probe` | map current knowledge before teaching |
-| `/skill teach` | Socratic teaching mode |
-| `/skill review` | consolidation protocol |
-| `/skill exam` | timed exam simulation |
-| `/research` | run the researcher subagent |
+| `/skill <name>` | load a teaching protocol (`probe`, `teach`, `socratic`, `review`, `exam`); `/skill` lists, `/skill off` clears |
+| `/dictate` | speak instead of typing - records with ffmpeg, transcribes locally with whisper |
+| `/model [provider:id]` | switch model; without an argument it opens a picker |
+| `/research [topic]` | run the researcher subagent |
 | `/mkcards <topic>` | generate FSRS cards from material |
-| `/review` | grade due cards (1=again 2=hard 3=good 4=easy) |
-| `/exit` | leave |
+| `/review` | grade due cards (1=again 2=hard 3=good 4=easy), `/skip` postpones |
+| `/strat <concept>` | which explanation strategies worked; `/stratlog <concept> <strategy> <yes\|no>` records one |
+| `/retrospect` | self-improvement pass over the session logs |
+| `/examstats` | exam analytics; `/logexam <topic> <correct>/<total>` records a result |
+| `/exit` | leave (Ctrl+C on an empty line does the same) |
 
 ## Obsidian integration
 
@@ -83,6 +91,7 @@ overwritten or appended to. Optional dashboard plugin in
 ## Tests
 
 ```bash
+npm test                                        # full suite: smoke, tui, vault_write
 node --experimental-strip-types test/smoke.ts   # end-to-end loop test (keyless)
 node --experimental-strip-types test/evals.ts   # behavioral evals (needs API key)
 ```
@@ -92,8 +101,14 @@ node --experimental-strip-types test/evals.ts   # behavioral evals (needs API ke
 | Env var | Default | Purpose |
 |---|---|---|
 | `OPENROUTER_API_KEY` | - | enables cloud models |
-| `MINERVA_PROVIDER` | `auto` | `openrouter` \| `ollama` \| `mock` \| `auto` |
+| `MINERVA_PROVIDER` | `auto` | `openrouter` \| `ollama` \| `lmstudio` \| `nvidia` \| `mock` \| `auto` |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | local Ollama endpoint |
+| `LMSTUDIO_BASE_URL` | `http://localhost:1234/v1` | local LM Studio endpoint |
+| `NVIDIA_API_KEY` / `NVIDIA_BASE_URL` | - / `https://integrate.api.nvidia.com/v1` | NVIDIA NIM (OpenAI-compatible) |
+| `RESEARCH_TASK` | - | default topic for a bare `/research` |
+| `MINERVA_WHISPER_MODEL` | `base` | whisper model used by `/dictate` |
+| `MINERVA_DICTATE_LANG` | `de` | dictation language |
+| `MINERVA_AUDIO_DEVICE` | `:0` | ffmpeg avfoundation input for `/dictate` |
 | `MINERVA_MODEL` | `anthropic/claude-sonnet-4.5` | model id for the tutor |
 | `MINERVA_MAX_TOKENS` | `1200` | per-request output budget |
 | `MINERVA_VAULT` | - | path to your Obsidian vault |
@@ -101,10 +116,10 @@ node --experimental-strip-types test/evals.ts   # behavioral evals (needs API ke
 
 ## Status
 
-Early prototype. M0-M3 milestones complete, verified through independent
-review passes plus scripted smoke/eval suites. See `PLAN.md` history in the
-project docs for the roadmap (A/B explanation strategies, exam analytics and
-an extended Obsidian plugin are next).
+Early prototype. Known gaps: the learner model and the session-log writer
+exist but are not called from the session loop, so `/retrospect` has no input
+yet; the `fact-checker`, `scout` and `grader` subagents load but no command
+routes to them; `/review` replays the due queue without interleaving topics.
 
 ## License
 

@@ -93,7 +93,9 @@ const youtubeInfo = defineTool({
 
 // Dedupes rolling auto-sub lines; also drops cue metadata/headers/empty lines.
 export function parseVtt(vtt: string): string {
-  const seen = new Set<string>();
+  // ponytail: rolling auto-subs repeat the previous line, so only a short window
+  // is deduped. A global set also swallowed genuine repetition in the talk.
+  const WINDOW = 3;
   const out: string[] = [];
   for (const raw of vtt.split("\n")) {
     const line = raw
@@ -103,8 +105,7 @@ export function parseVtt(vtt: string): string {
     if (/^(WEBVTT|Kind:|Language:|NOTE\b|STYLE\b|REGION\b)/i.test(line)) continue;
     if (/-->/.test(line)) continue;
     if (/^\d+$/.test(line)) continue;
-    if (seen.has(line)) continue;
-    seen.add(line);
+    if (out.slice(-WINDOW).includes(line)) continue;
     out.push(line);
   }
   return out.join(" ");

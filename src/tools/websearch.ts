@@ -42,7 +42,7 @@ export const webSearch = defineTool({
       // DDG Lite rows look like <a rel="nofollow" href="...l/?uddg=<enc>">title</a>
       // followed by a <td class="result-snippet"> cell.
       const rowRe =
-        /<a[^>]+href="([^"]*(?:\?|&)uddg=[^"]+)"[^>]*>([\s\S]*?)<\/a>(?:[\s\S]{0,600}?class="result-snippet"[^>]*>([\s\S]*?)<\/td>)?/g;
+        /<a[^>]+href="([^"]*(?:\?|&)uddg=[^"]+)"[^>]*>([\s\S]*?)<\/a>(?:[\s\S]{0,600}?class=['"]result-snippet['"][^>]*>([\s\S]*?)<\/td>)?/g;
       for (const m of html.matchAll(rowRe)) {
         const url = decodeUddg(m[1]);
         if (!url || !url.startsWith("http")) continue;

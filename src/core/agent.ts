@@ -69,7 +69,7 @@ export async function* runTurn(
         yield { type: "tool_start", call: chunk.block };
       } else if (chunk.kind === "finish") {
         if (chunk.stopReason === "aborted") aborted = true;
-        lastUsage = chunk.usage;
+        lastUsage = chunk.usage ?? lastUsage; // a later finish frame without usage must not erase it
       }
     }
 

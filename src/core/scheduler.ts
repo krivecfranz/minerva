@@ -68,7 +68,9 @@ export function nextIntervalDays(card: MinervaCard, now: Date = new Date()): num
 }
 
 export function sortDue(cards: MinervaCard[], now: Date = new Date()): MinervaCard[] {
-  const t = (c: MinervaCard) => Math.min(0, asFsrs(c).due.getTime() - now.getTime());
+  // ponytail: plain due time. Math.min(0, ...) clamped every future card to 0,
+  // so not-yet-due cards were not ordered at all.
+  const t = (c: MinervaCard) => asFsrs(c).due.getTime();
   return [...cards].sort((a, b) => {
     const [da, db] = [isDue(a, now), isDue(b, now)];
     if (da !== db) return da ? -1 : 1;

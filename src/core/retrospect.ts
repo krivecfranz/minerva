@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export interface SessionLogEntry {
-  ts: number;
+  ts: string | number;
   summary: string;
 }
 
@@ -20,7 +20,7 @@ export async function readSessionLogs(vaultRoot: string, limit = 20): Promise<Se
     if (!line.trim()) continue;
     try {
       const o = JSON.parse(line) as SessionLogEntry;
-      if (typeof o.ts === "number" && typeof o.summary === "string") out.push(o);
+      if ((typeof o.ts === "number" || typeof o.ts === "string") && typeof o.summary === "string") out.push(o);
     } catch {
       // corrupt line: ignore
     }

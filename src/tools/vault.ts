@@ -1,7 +1,13 @@
 import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { readFile, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { defineTool, type ToolDef } from "./types.ts";
+
+// ponytail: execFile is callback-style. Awaiting it directly yields a ChildProcess,
+// so the rg path always threw and silently fell back to the naive scan - which
+// searches case-insensitive substrings instead of regex, i.e. different results.
+const run = promisify(execFile);
 
 function vaultRoot(): string {
   const root = process.env.MINERVA_VAULT;
@@ -57,7 +63,7 @@ const vaultSearch = defineTool({
 
     let files: string[] | null = null;
     try {
-      const { stdout } = await execFile("rg", ["-l", "--glob", glob, "--", query, root], { maxBuffer: 10 << 20 });
+      const { stdout } = await run("rg", ["-l", "--glob", glob, "--", query, root], { maxBuffer: 10 << 20 });
       files = stdout.trim() ? stdout.trim().split("\n") : [];
     } catch (err: any) {
       if (err?.code !== 1) {

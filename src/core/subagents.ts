@@ -99,7 +99,8 @@ function parseFrontmatter(raw: string): { meta: Record<string, string>; body: st
 }
 
 export async function loadAgents(dir: string, allTools: ToolDef[]): Promise<SubAgent[]> {
-  const files = (await readdir(dir)).filter((f) => f.endsWith(".md")).sort();
+  // ponytail: missing dir is not fatal - running from another cwd should not crash the CLI
+  const files = (await readdir(dir).catch(() => [] as string[])).filter((f) => f.endsWith(".md")).sort();
   const agents: SubAgent[] = [];
   for (const file of files) {
     const raw = await readFile(`${dir}/${file}`, "utf8");

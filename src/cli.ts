@@ -1,7 +1,10 @@
-import readline from "node:readline";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
-import { magenta, dim, cyan, green, red } from "./ui/style.ts";
+import { magenta, dim, cyan, green, red, olive, white, grey } from "./ui/style.ts";
+import { Tui } from "./ui/tui.ts";
+import { banner } from "./ui/banner.ts";
+import { dictate } from "./core/dictate.ts";
+import { loadSkillTool } from "./tools/loadskill.ts";
 import { Session } from "./core/session.ts";
 import { runTurn, tutorSystem } from "./core/agent.ts";
 import { runSubAgent, loadAgents } from "./core/subagents.ts";
@@ -26,9 +29,16 @@ const tools: ToolDef[] = [webSearch, webFetch, ...youtubeTools];
 if (process.env.MINERVA_VAULT) tools.push(...vaultTools, vaultWrite);
 const ollamaBaseUrl = process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
 const lmstudioBaseUrl = process.env.LMSTUDIO_BASE_URL ?? "http://localhost:1234/v1";
+const nvidiaBaseUrl = process.env.NVIDIA_BASE_URL ?? "https://integrate.api.nvidia.com/v1";
 function makeAdapter(p: string) {
   if (p === "ollama") return new OllamaAdapter(ollamaBaseUrl);
+  if (p === "openrouter") {
+    if (process.env.OPENROUTER_API_KEY) return new OpenRouterAdapter();
+    console.log(red("OPENROUTER_API_KEY fehlt - faellt auf mock zurueck"));
+    return new MockAdapter();
+  }
   if (p === "lmstudio") return new OpenRouterAdapter(lmstudioBaseUrl);
+  if (p === "nvidia") return new OpenRouterAdapter(nvidiaBaseUrl, process.env.NVIDIA_API_KEY);
   if (p === "mock") return new MockAdapter();
   if (process.env.OPENROUTER_API_KEY) return new OpenRouterAdapter();
   return new MockAdapter();
@@ -36,7 +46,7 @@ function makeAdapter(p: string) {
 let provider = process.env.MINERVA_PROVIDER ?? "auto";
 let adapter = makeAdapter(provider);
 let currentModel = process.env.MINERVA_MODEL ?? defaultModel;
-const PROVIDERS = ["ollama", "lmstudio", "mock", "openrouter"];
+const PROVIDERS = ["ollama", "lmstudio", "nvidia", "mock", "openrouter"];
 
 // ponytail: 1.5s timeout per source - an unreachable local server must not hang the picker
 async function listModels(category: string, url: string, key: "models" | "data", field: string): Promise<PickOption[]> {
@@ -76,30 +86,71 @@ const [session, skills, agents] = await Promise.all([
   discoverSkills(["./skills"]),
   loadAgents("./agents", tools),
 ]);
-console.log(dim(`session ${session.id} - tools: ${tools.map((t) => t.name).join(", ")} - agents: ${agents.map((a) => a.name).join(", ")} - skills: ${skills.map((s) => s.name).join(", ")}`));
+tools.push(loadSkillTool(skills));
+const termWidth = Math.max(40, Math.min(process.stdout.columns || 80, 120));
+console.log(banner({
+  version: "0.0.1",
+  skills: skills.map((s) => s.name),
+  tools: tools.map((t) => t.name),
+  agents: agents.map((a) => a.name),
+  width: termWidth,
+}));
+console.log(grey(`session ${session.id}`) + "\n");
 
 let history = [];
-let system = tutorSystem(skillsSystemPrompt(skills));
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: magenta("you > ") });
-const promptSafe = () => {
-  if (!rl.closed) rl.prompt();
-};
-promptSafe();
+let activeSkill: string | null = null;
+let activeSkillBody = "";
+// ponytail: every rebuild goes through here - /examstats and /retrospect used to
+// reset the prompt and drop the loaded skill protocol without telling anyone.
+const rebuildSystem = () =>
+  tutorSystem(skillsSystemPrompt(skills)) +
+  (activeSkill ? `\n\n# Active skill: ${activeSkill}\n${activeSkillBody}` : "");
+let system = rebuildSystem();
+const tui = new Tui({
+  cwd: process.cwd().replace(process.env.HOME ?? "", "~"),
+  provider,
+  model: currentModel,
+});
+
+// ponytail: one list, two consumers - /help prints it, the editor suggests from it
+const COMMANDS = [
+  { name: "/skill", hint: "Lehr-Protokoll aktivieren - /skill <name>, /skill off, ohne Argument: Liste" },
+  { name: "/dictate", hint: "Sprechen statt tippen, lokal ueber Whisper" },
+  { name: "/model", hint: "Modell wechseln - ohne Argument interaktiver Picker" },
+  { name: "/review", hint: "faellige Karten wiederholen" },
+  { name: "/mkcards", hint: "Karten aus dem Stoff erzeugen - /mkcards <thema>" },
+  { name: "/research", hint: "Researcher-Subagent starten" },
+  { name: "/strat", hint: "Erklaerstrategien zu einem Konzept abfragen" },
+  { name: "/stratlog", hint: "Ergebnis einer Strategie protokollieren - <konzept> <strategie> <yes|no>" },
+  { name: "/retrospect", hint: "Selbstverbesserungs-Lauf ueber die Session-Logs" },
+  { name: "/examstats", hint: "Pruefungsstatistik anzeigen" },
+  { name: "/logexam", hint: "Ergebnis eintragen - /logexam <thema> <richtig>/<gesamt>" },
+  { name: "/help", hint: "diese Liste" },
+  { name: "/exit", hint: "beenden - Ctrl+C auf leerer Zeile tut dasselbe" },
+];
+tui.setCommands(COMMANDS);
 
 // Review state machine: lives in the same line loop (rl.question conflicts with the iterator).
 let review: { deck: MinervaCard[]; queue: MinervaCard[]; phase: "question" | "grade" } | null = null;
 const GRADES = { "1": "again", "2": "hard", "3": "good", "4": "easy" } as const;
 
-for await (const line of rl) {
-  const input = line.trim();
+while (true) {
+  const line = await tui.readLine();
+  if (line === null) break;
+  let input = line.trim();
+  if (input === "/dictate") {
+    const spoken = await dictate(tui);
+    if (!spoken) continue;
+    console.log(magenta("you > ") + white(spoken));
+    input = spoken;
+  }
   if (review) {
     // /skip works in both phases: postpone without revealing/grading
     if (input === "/skip") {
       review.queue.push(review.queue.shift()!);
-      if (review.phase === "grade") {
-        console.log(dim(`\nQ ${review.queue[0].question}`));
-        review.phase = "question";
-      }
+      review.phase = "question";
+      console.log(`\n${magenta("Q")} ${review.queue[0].question}`);
+      console.log(dim("(enter to reveal, /skip to postpone)"));
       continue;
     }
     try {
@@ -125,14 +176,12 @@ for await (const line of rl) {
       await saveDeck(review.deck).catch(() => {});
       console.log(red(`review aborted, deck saved: ${err instanceof Error ? err.message : err}`));
       review = null;
-      promptSafe();
       continue;
     }
     if (!review.queue.length) {
       await saveDeck(review.deck);
       console.log(green("review done - deck saved"));
       review = null;
-      promptSafe();
       continue;
     }
     console.log(`\n${magenta("Q")} ${review.queue[0].question}`);
@@ -140,10 +189,40 @@ for await (const line of rl) {
     continue;
   }
   if (!input) {
-    promptSafe();
     continue;
   }
   if (input === "/exit") break;
+  if (input === "/help" || input === "/?") {
+    console.log(cyan("[Commands]"));
+    for (const c of COMMANDS) console.log("  " + white(c.name.padEnd(12)) + grey(c.hint));
+    continue;
+  }
+  const skillCmd = /^\/skills?\b\s*(.*)$/.exec(input);
+  if (skillCmd) {
+    const name = skillCmd[1].trim();
+    if (!name || name === "list") {
+      console.log(cyan("[Skills]"));
+      for (const s of skills) console.log("  " + white(s.name.padEnd(12)) + grey(s.description.slice(0, 90)));
+      console.log(grey(activeSkill ? `aktiv: ${activeSkill}` : "keiner aktiv - /skill <name> aktiviert einen"));
+    } else if (name === "off") {
+      activeSkill = null;
+      activeSkillBody = "";
+      system = rebuildSystem();
+      console.log(green("skill deaktiviert"));
+    } else {
+      const skill = skills.find((s) => s.name === name);
+      if (!skill) {
+        console.log(red(`kein skill "${name}"`) + grey(` - vorhanden: ${skills.map((s) => s.name).join(", ")}`));
+      } else {
+        const body = await loadSkillBody(skill);
+        activeSkill = skill.name;
+        activeSkillBody = body;
+        system = rebuildSystem();
+        console.log(green(`skill aktiv: ${skill.name}`) + grey(` (${body.length} zeichen protokoll)`));
+      }
+    }
+    continue;
+  }
   if (input.startsWith("/model")) {
     const arg = input.slice(6).trim();
     if (!arg) {
@@ -157,7 +236,10 @@ for await (const line of rl) {
       if (picked) {
         provider = picked.provider;
         adapter = makeAdapter(provider);
+        // ponytail: if the adapter fell back, say so - the status bar must not claim otherwise
+        if (adapter instanceof MockAdapter && provider !== "mock") provider = "mock";
         currentModel = picked.model;
+        tui.setStatus({ provider, model: currentModel });
         console.log(green(`-> provider: ${provider} - model: ${currentModel}`));
       } else {
         console.log(dim("cancelled"));
@@ -167,26 +249,26 @@ for await (const line of rl) {
       if (rest.length && PROVIDERS.includes(maybeProvider)) {
         provider = maybeProvider;
         adapter = makeAdapter(provider);
+        // ponytail: if the adapter fell back, say so - the status bar must not claim otherwise
+        if (adapter instanceof MockAdapter && provider !== "mock") provider = "mock";
         currentModel = rest.join(":");
       } else {
         currentModel = arg;
       }
+      tui.setStatus({ provider, model: currentModel });
       console.log(green(`-> provider: ${provider} - model: ${currentModel}`));
     }
-    promptSafe();
     continue;
   }
   if (input === "/review") {
     if (!vault) {
       console.log(red("MINERVA_VAULT not set - no deck location"));
-      promptSafe();
       continue;
     }
     const deck = await loadDeck();
     const due = sortDue(deck).filter((c) => isDue(c));
     if (!due.length) {
       console.log(green("nothing due. deck size: " + deck.length));
-      promptSafe();
       continue;
     }
     console.log(cyan(`${due.length} card(s) due.`));
@@ -195,28 +277,36 @@ for await (const line of rl) {
     console.log(dim("(enter to reveal, /skip to postpone)"));
     continue;
   }
-  if (input === "/research") {
+  if (input === "/research" || input.startsWith("/research ")) {
+    const topic = input.slice(9).trim() || process.env.RESEARCH_TASK || "Summarize the current state of spaced repetition algorithms.";
     const researcher = agents.find((a) => a.name === "researcher");
     if (!researcher) {
       console.log(dim("no researcher agent found"));
     } else {
-      console.log(cyan("minerva > researching..."));
-      const { result } = await runSubAgent(adapter, researcher, process.env.RESEARCH_TASK ?? "Summarize the current state of spaced repetition algorithms.");
-      console.log(result);
+      const job = tui.task("researcher", "recherchiert");
+      try {
+        const { result } = await runSubAgent(adapter, researcher, topic);
+        console.log(result);
+      } finally {
+        job.done();
+      }
     }
-    promptSafe();
     continue;
   }
   if (input.startsWith("/mkcards")) {
     if (!vault) {
       console.log(red("MINERVA_VAULT not set - no deck location"));
-      promptSafe();
       continue;
     }
     const topic = input.slice(8).trim() || "the last session's material";
     const writer = agents.find((a) => a.name === "card-writer");
-    console.log(cyan(`minerva > writing cards about: ${topic}`));
-    const { result } = await runSubAgent(adapter, writer!, topic);
+    const job = tui.task("card-writer", topic.slice(0, 40));
+    let result: string;
+    try {
+      ({ result } = await runSubAgent(adapter, writer!, topic));
+    } finally {
+      job.done();
+    }
     try {
       const parsed = JSON.parse(result.slice(result.indexOf("["), result.lastIndexOf("]") + 1)) as { question: string; answer: string; concept?: string }[];
       const deck = await loadDeck();
@@ -226,14 +316,12 @@ for await (const line of rl) {
     } catch {
       console.log(red("card-writer returned invalid JSON:\n" + result.slice(0, 400)));
     }
-    promptSafe();
     continue;
   }
   if (input.startsWith("/strat")) {
     // RSI level 3: query/log which explanation strategy works per concept
     if (!vault) {
       console.log(red("MINERVA_VAULT not set - no strategies.json location"));
-      promptSafe();
       continue;
     }
     const m = /^\/strat(?:log)?\s+(\S+)(?:\s+(\S+)(?:\s+(yes|no))?)?$/.exec(input);
@@ -250,19 +338,16 @@ for await (const line of rl) {
       const hint = strategyRotationHint(store[m[1]], m[1]);
       console.log(hint ?? dim(`no data for "${m[1]}" yet - record outcomes with /stratlog`));
     }
-    promptSafe();
     continue;
   }
   if (input === "/retrospect") {
     if (!vault) {
       console.log(red("MINERVA_VAULT not set - no proposals directory"));
-      promptSafe();
       continue;
     }
     const agent = agents.find((a) => a.name === "retrospect");
     if (!agent) {
       console.log(red("no retrospect agent found"));
-      promptSafe();
       continue;
     }
     console.log(cyan("minerva > analyzing session history..."));
@@ -272,7 +357,6 @@ for await (const line of rl) {
     ]);
     if (!logs.length) {
       console.log(dim("no session logs yet - nothing to analyze"));
-      promptSafe();
       continue;
     }
     const { result } = await runSubAgent(adapter, agent, buildRetrospectPrompt(logs, inventory));
@@ -282,29 +366,25 @@ for await (const line of rl) {
     } catch (e) {
       console.log(red(`proposal failed: ${e instanceof Error ? e.message : e}`));
     }
-    promptSafe();
     continue;
   }
   if (input === "/examstats") {
     if (!vault) {
       console.log(red("MINERVA_VAULT not set - no exams.jsonl location"));
-      promptSafe();
       continue;
     }
     const weak = await topicWeaknesses(vault);
     if (!weak.length) console.log(dim("no exam data"));
     else console.table(weak.map((w) => ({ topic: w.topic, correct: Math.round(w.rate * 100) + "%" })));
     // ponytail: re-inject exam context into the system prompt for subsequent turns
-    system = tutorSystem(skillsSystemPrompt(skills));
+    system = rebuildSystem();
     const ctx = await examSystemContext(vault);
     if (ctx) system += "\n\n" + ctx;
-    promptSafe();
     continue;
   }
   if (input.startsWith("/logexam")) {
     if (!vault) {
       console.log(red("MINERVA_VAULT not set - no exams.jsonl location"));
-      promptSafe();
       continue;
     }
     // ponytail: grading stays conversational, this just records the result
@@ -315,7 +395,6 @@ for await (const line of rl) {
       await recordExamResult(vault, { topic: m[1], correct: +m[2], total: +m[3], date: new Date().toISOString() });
       console.log(green(`logged ${m[2]}/${m[3]} for ${m[1]}`));
     }
-    promptSafe();
     continue;
   }
   process.stdout.write(cyan("minerva > "));
@@ -326,7 +405,10 @@ for await (const line of rl) {
       else {
         history.push(...ev.newMessages);
         process.stdout.write("\n");
-        if (ev.usage) console.log(dim(`(${ev.usage.inputTokens} in / ${ev.usage.outputTokens} out)`));
+        if (ev.usage) {
+          tui.setStatus({ used: ev.usage.inputTokens + ev.usage.outputTokens });
+          console.log(dim(`(${ev.usage.inputTokens} in / ${ev.usage.outputTokens} out)`));
+        }
       }
     }
   } catch (err) {
@@ -334,5 +416,5 @@ for await (const line of rl) {
     // (history stays consistent - only completed messages were pushed)
     console.log(red(`\n[error] ${err instanceof Error ? err.message : err}`));
   }
-  promptSafe();
 }
+tui.close();
