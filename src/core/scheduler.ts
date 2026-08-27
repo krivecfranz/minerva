@@ -1,10 +1,9 @@
-// ponytail: thin ts-fsrs wrapper; defaults only, pass FSRSParameters via opts when tuning matters
+// ponytail: thin ts-fsrs wrapper, defaults only. Add a params argument when tuning matters.
 import {
   fsrs,
   createEmptyCard,
   Rating,
   type Card,
-  type FSRSParameters,
 } from "ts-fsrs";
 
 export interface MinervaCard {
@@ -16,8 +15,6 @@ export interface MinervaCard {
   // ponytail: provider Card object kept opaque; swap for Card type once storage layer exists
   fsrs: unknown;
 }
-
-type Opts = Partial<FSRSParameters>;
 
 // ponytail: enable_short_term=false so "good"/"easy" land on day-scale intervals, not 10-minute learning steps
 const S = fsrs({ enable_short_term: false });
@@ -33,10 +30,11 @@ export function newCard(
   id: string,
   question: string,
   answer: string,
-  opts?: Opts,
+  concept?: string,
 ): MinervaCard {
-  void opts; // ponytail: per-card params ignored, single global scheduler is enough
-  return { id, question, answer, fsrs: createEmptyCard() };
+  // ponytail: per-card FSRS params still ignored, one global scheduler is enough.
+  // The concept is kept though - interleaving in /review needs it.
+  return { id, question, answer, ...(concept ? { concept } : {}), fsrs: createEmptyCard() };
 }
 
 function asFsrs(card: MinervaCard): Card {
@@ -76,4 +74,31 @@ export function sortDue(cards: MinervaCard[], now: Date = new Date()): MinervaCa
     if (da !== db) return da ? -1 : 1;
     return t(a) - t(b);
   });
+}
+
+/**
+ * Round-robins the queue across concepts so consecutive cards come from
+ * different ones - that mixing is what makes a review session interleaved.
+ * Cards without a concept form their own group and are treated like any other.
+ */
+export function interleave(cards: MinervaCard[]): MinervaCard[] {
+  const groups = new Map<string, MinervaCard[]>();
+  for (const c of cards) {
+    const key = c.concept ?? "";
+    const list = groups.get(key);
+    if (list) list.push(c);
+    else groups.set(key, [c]);
+  }
+  if (groups.size < 2) return [...cards];
+
+  const out: MinervaCard[] = [];
+  // ponytail: re-sorts per card - O(n^2 log n). Decks are tens of cards, not millions.
+  while (out.length < cards.length) {
+    const lists = [...groups.values()].filter((l) => l.length).sort((a, b) => b.length - a.length);
+    const last = out[out.length - 1]?.concept ?? "";
+    // prefer the largest group that differs from the previous card
+    const pick = lists.find((l) => (l[0].concept ?? "") !== last) ?? lists[0];
+    out.push(pick.shift()!);
+  }
+  return out;
 }

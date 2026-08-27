@@ -7,6 +7,7 @@ interface PendingToolCall {
 }
 
 interface OpenAiToolCallDelta {
+  index?: number;
   id?: string;
   function?: { name?: string; arguments?: string };
 }
@@ -115,8 +116,8 @@ export class OpenRouterAdapter implements LlmAdapter {
     }
 
     const completedToolCalls: PendingToolCall[] = [];
-    const openById = new Map<number | undefined, PendingToolCall>();
-    const bufferByIndex = new Map<number | undefined, string>();
+    const openById = new Map<string | number, PendingToolCall>();
+    const bufferByIndex = new Map<string | number, string>();
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -165,7 +166,9 @@ export class OpenRouterAdapter implements LlmAdapter {
 
           if (delta?.tool_calls) {
             for (const tc of delta.tool_calls) {
-              const idx = tc.index ?? 0;
+              // ponytail: fall back to the call id when a server omits index - keying
+              // everything on 0 merged parallel calls into one broken argument string
+              const idx = tc.index ?? tc.id ?? 0;
               let pending = openById.get(idx);
               if (!pending) {
                 pending = { id: tc.id ?? "", name: "", args: "" };
@@ -173,7 +176,8 @@ export class OpenRouterAdapter implements LlmAdapter {
               }
               if (tc.id) pending.id = tc.id;
               // ponytail: accumulate streamed name/args fragments instead of emitting partial blocks
-              if (tc.function?.name) pending.name += tc.function.name;
+              // some servers repeat the whole name each delta instead of fragmenting it
+              if (tc.function?.name && pending.name !== tc.function.name) pending.name += tc.function.name;
               if (tc.function?.arguments) bufferByIndex.set(idx, (bufferByIndex.get(idx) ?? "") + tc.function.arguments);
             }
           }
@@ -207,8 +211,8 @@ export class OpenRouterAdapter implements LlmAdapter {
 }
 
 function flushToolCalls(
-  openById: Map<number | undefined, PendingToolCall>,
-  bufferByIndex: Map<number | undefined, string>,
+  openById: Map<string | number, PendingToolCall>,
+  bufferByIndex: Map<string | number, string>,
 ): ToolCallBlock[] {
   const blocks: ToolCallBlock[] = [];
   for (const [idx, pending] of openById) {

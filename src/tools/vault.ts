@@ -9,6 +9,12 @@ import { defineTool, type ToolDef } from "./types.ts";
 // searches case-insensitive substrings instead of regex, i.e. different results.
 const run = promisify(execFile);
 
+// ponytail: async twin of vaultRoot - macOS maps /var to /private/var, so a plain
+// resolve() and a realpath() root compare unequal and the guards disagree.
+async function vaultRootReal(): Promise<string> {
+  return realpath(vaultRoot());
+}
+
 function vaultRoot(): string {
   const root = process.env.MINERVA_VAULT;
   if (!root) throw new Error("MINERVA_VAULT is not set; export it to your Obsidian vault root");
@@ -57,7 +63,7 @@ const vaultSearch = defineTool({
     required: ["query"],
   },
   async execute(args) {
-    const root = vaultRoot();
+    const root = await vaultRootReal();
     const query = String(args.query);
     const glob = typeof args.glob === "string" ? args.glob : "**/*.md";
 
@@ -101,7 +107,7 @@ const vaultRead = defineTool({
     required: ["path"],
   },
   async execute(args) {
-    const root = await realpath(vaultRoot()); // macOS: /var is a symlink to /private/var
+    const root = await vaultRootReal();
     let abs = insideVault(root, String(args.path)); // trust boundary: never read outside the vault
     abs = await realpath(abs); // symlinks must not escape the vault either
     if (!abs.startsWith(root + path.sep)) throw new Error(`Path escapes vault root: ${args.path}`);
@@ -138,7 +144,7 @@ const vaultTree = defineTool({
     },
   },
   async execute(args) {
-    const root = vaultRoot();
+    const root = await vaultRootReal();
     const abs = insideVault(root, typeof args.path === "string" ? args.path : ".");
     const depth = Math.min(6, Math.max(1, Math.floor(Number(args.depth) || 2)));
     const out: string[] = [`${(await walk(abs)).length} notes`];

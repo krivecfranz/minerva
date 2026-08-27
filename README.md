@@ -29,8 +29,9 @@ Core design rule taken from the research corpus:
   `exam` (timed simulation with strict grading)
 - **FSRS spaced repetition** built in (`ts-fsrs`): `/mkcards` generates cards
   from material, `/review` runs interleaved review sessions
-- **Learner model** module with evidence-gated mastery updates
-  (`src/core/learner.ts`) - written, but not yet wired into the session loop
+- **Learner model** persisted inside your Obsidian vault
+  (`000-Meta/minerva/`), mastery updates require evidence - fed by exam
+  results and card grades
 - **Eval suite**: scripted learner personas check that the tutor actually
   follows its pedagogy rules against real models
 
@@ -66,8 +67,9 @@ Session commands:
 | `/dictate` | speak instead of typing - records with ffmpeg, transcribes locally with whisper |
 | `/model [provider:id]` | switch model; without an argument it opens a picker |
 | `/research [topic]` | run the researcher subagent |
+| `/agent <name> <task>` | run any loaded subagent (`researcher`, `fact-checker`, `scout`, `grader`, `card-writer`, `retrospect`) |
 | `/mkcards <topic>` | generate FSRS cards from material |
-| `/review` | grade due cards (1=again 2=hard 3=good 4=easy), `/skip` postpones |
+| `/review` | grade due cards (1=again 2=hard 3=good 4=easy), interleaved across concepts; `/skip` postpones |
 | `/strat <concept>` | which explanation strategies worked; `/stratlog <concept> <strategy> <yes\|no>` records one |
 | `/retrospect` | self-improvement pass over the session logs |
 | `/examstats` | exam analytics; `/logexam <topic> <correct>/<total>` records a result |
@@ -116,10 +118,11 @@ node --experimental-strip-types test/evals.ts   # behavioral evals (needs API ke
 
 ## Status
 
-Early prototype. Known gaps: the learner model and the session-log writer
-exist but are not called from the session loop, so `/retrospect` has no input
-yet; the `fact-checker`, `scout` and `grader` subagents load but no command
-routes to them; `/review` replays the due queue without interleaving topics.
+Early prototype. The session loop writes `sessions.jsonl` after every turn and
+updates `model.json` from exam results and card grades, so `/retrospect` has
+real input. Known gaps: session transcripts are resumable in format but there
+is no `--resume` entry point, and subagents are invoked manually via `/agent`
+rather than by the tutor itself.
 
 ## License
 

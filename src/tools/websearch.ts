@@ -44,7 +44,14 @@ export const webSearch = defineTool({
       const rowRe =
         /<a[^>]+href="([^"]*(?:\?|&)uddg=[^"]+)"[^>]*>([\s\S]*?)<\/a>(?:[\s\S]{0,600}?class=['"]result-snippet['"][^>]*>([\s\S]*?)<\/td>)?/g;
       for (const m of html.matchAll(rowRe)) {
-        const url = decodeUddg(m[1]);
+        // ponytail: per-row guard. A single malformed %-escape used to abort the
+        // whole loop and discard every result gathered before it.
+        let url: string | null = null;
+        try {
+          url = decodeUddg(m[1]);
+        } catch {
+          continue;
+        }
         if (!url || !url.startsWith("http")) continue;
         if (results.some((r) => r.url === url)) continue;
         const strip = (s: string) =>

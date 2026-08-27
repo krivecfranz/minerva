@@ -10,9 +10,10 @@ import { runTurn, tutorSystem } from "./core/agent.ts";
 import { runSubAgent, loadAgents } from "./core/subagents.ts";
 import { discoverSkills, skillsSystemPrompt, loadSkillBody } from "./core/skills.ts";
 import { recordExamResult, topicWeaknesses, examSystemContext } from "./core/exam.ts";
-import { newCard, isDue, sortDue, gradeCard, type MinervaCard } from "./core/scheduler.ts";
+import { newCard, isDue, sortDue, interleave, gradeCard, type MinervaCard } from "./core/scheduler.ts";
 import { loadStrategies, recordOutcome, strategyRotationHint, STRATEGY_NAMES } from "./core/strategies.ts";
 import { readSessionLogs, loadCurrentPrompts, writeProposal, buildRetrospectPrompt } from "./core/retrospect.ts";
+import { recordSessionLog, updateMastery } from "./core/learner.ts";
 import { OpenRouterAdapter } from "./providers/openrouter.ts";
 import { OllamaAdapter } from "./providers/ollama.ts";
 import { MockAdapter } from "./providers/mock.ts";
@@ -81,12 +82,11 @@ async function saveDeck(cards: MinervaCard[]): Promise<void> {
 }
 if (adapter instanceof MockAdapter) console.log(dim("(mock mode - set OPENROUTER_API_KEY or MINERVA_PROVIDER=ollama)"));
 
-const [session, skills, agents] = await Promise.all([
-  Session.create(),
-  discoverSkills(["./skills"]),
-  loadAgents("./agents", tools),
-]);
+const [session, skills] = await Promise.all([Session.create(), discoverSkills(["./skills"])]);
+// load_skill has to exist before the subagents are built - loadAgents filters out
+// tool names it does not know, so an agent declaring it would silently lose it.
 tools.push(loadSkillTool(skills));
+const agents = await loadAgents("./agents", tools);
 const termWidth = Math.max(40, Math.min(process.stdout.columns || 80, 120));
 console.log(banner({
   version: "0.0.1",
@@ -119,7 +119,8 @@ const COMMANDS = [
   { name: "/model", hint: "Modell wechseln - ohne Argument interaktiver Picker" },
   { name: "/review", hint: "faellige Karten wiederholen" },
   { name: "/mkcards", hint: "Karten aus dem Stoff erzeugen - /mkcards <thema>" },
-  { name: "/research", hint: "Researcher-Subagent starten" },
+  { name: "/research", hint: "Researcher-Subagent starten - /research <thema>" },
+  { name: "/agent", hint: "beliebigen Subagenten starten - /agent <name> <auftrag>" },
   { name: "/strat", hint: "Erklaerstrategien zu einem Konzept abfragen" },
   { name: "/stratlog", hint: "Ergebnis einer Strategie protokollieren - <konzept> <strategie> <yes|no>" },
   { name: "/retrospect", hint: "Selbstverbesserungs-Lauf ueber die Session-Logs" },
@@ -169,6 +170,10 @@ while (true) {
         const card = review.queue.shift()!;
         const idx = review.deck.findIndex((c) => c.id === card.id);
         review.deck[idx] = gradeCard(card, g);
+        if (vault && card.concept) {
+          const mastery = { again: 0.1, hard: 0.4, good: 0.75, easy: 1 }[g];
+          await updateMastery(vault, "review", card.concept, { mastery, confidence: 0.5 }, `card ${card.id} graded ${g}`).catch(() => {});
+        }
         console.log(dim(`-> ${g}, next in ${Math.max(1, Math.round((new Date(review.deck[idx].fsrs.due as unknown as string).getTime() - Date.now()) / 86_400_000))}d`));
       }
     } catch (err) {
@@ -272,9 +277,34 @@ while (true) {
       continue;
     }
     console.log(cyan(`${due.length} card(s) due.`));
-    review = { deck, queue: [...due], phase: "question" };
+    review = { deck, queue: interleave(due), phase: "question" };
     console.log(`\n${magenta("Q")} ${review.queue[0].question}`);
     console.log(dim("(enter to reveal, /skip to postpone)"));
+    continue;
+  }
+  if (input === "/agent" || input.startsWith("/agent ")) {
+    const rest = input.slice(6).trim();
+    const [name, ...taskWords] = rest.split(/\s+/);
+    const agent = name ? agents.find((a) => a.name === name) : undefined;
+    if (!agent) {
+      console.log(name ? red(`kein subagent "${name}"`) : red("usage: /agent <name> <auftrag>"));
+      console.log(dim(`vorhanden: ${agents.map((a) => a.name).join(", ")}`));
+      continue;
+    }
+    const task = taskWords.join(" ");
+    if (!task) {
+      console.log(red(`usage: /agent ${name} <auftrag>`));
+      continue;
+    }
+    const job = tui.task(agent.name, task.slice(0, 40));
+    try {
+      const { result } = await runSubAgent(adapter, agent, task);
+      console.log(result);
+    } catch (err) {
+      console.log(red(`${agent.name} failed: ${err instanceof Error ? err.message : err}`));
+    } finally {
+      job.done();
+    }
     continue;
   }
   if (input === "/research" || input.startsWith("/research ")) {
@@ -300,17 +330,24 @@ while (true) {
     }
     const topic = input.slice(8).trim() || "the last session's material";
     const writer = agents.find((a) => a.name === "card-writer");
+    if (!writer) {
+      console.log(red("card-writer agent fehlt (agents/card-writer.md)"));
+      continue;
+    }
     const job = tui.task("card-writer", topic.slice(0, 40));
     let result: string;
     try {
-      ({ result } = await runSubAgent(adapter, writer!, topic));
+      ({ result } = await runSubAgent(adapter, writer, topic));
+    } catch (err) {
+      console.log(red(`card-writer failed: ${err instanceof Error ? err.message : err}`));
+      continue;
     } finally {
       job.done();
     }
     try {
       const parsed = JSON.parse(result.slice(result.indexOf("["), result.lastIndexOf("]") + 1)) as { question: string; answer: string; concept?: string }[];
       const deck = await loadDeck();
-      for (const c of parsed) deck.push(newCard(`${Date.now()}-${deck.length}`, c.question, c.answer));
+      for (const c of parsed) deck.push(newCard(`${Date.now()}-${deck.length}`, c.question, c.answer, c.concept));
       await saveDeck(deck);
       console.log(green(`added ${parsed.length} cards (deck: ${deck.length})`));
     } catch {
@@ -324,19 +361,27 @@ while (true) {
       console.log(red("MINERVA_VAULT not set - no strategies.json location"));
       continue;
     }
-    const m = /^\/strat(?:log)?\s+(\S+)(?:\s+(\S+)(?:\s+(yes|no))?)?$/.exec(input);
-    if (!m) {
-      console.log(red("usage: /strat <concept> | /stratlog <concept> <strategy> <yes|no>"));
-      console.log(dim(`strategies: ${STRATEGY_NAMES.join(", ")}`));
-    } else if (input.startsWith("/stratlog") && m[2] && m[3]) {
-      await recordOutcome(vault, m[1], m[2], m[3] === "yes");
-      console.log(green(`recorded: ${m[2]} on "${m[1]}" -> ${m[3]}`));
-    } else if (input.startsWith("/stratlog")) {
-      console.log(red("usage: /stratlog <concept> <strategy> <yes|no>"));
+    // ponytail: concepts have spaces ("quadratische Ergaenzung"), so the concept is
+    // whatever is left once the trailing fixed-arity arguments are taken off.
+    if (input.startsWith("/stratlog")) {
+      const m = /^\/stratlog\s+(.+)\s+(\S+)\s+(yes|no)$/.exec(input);
+      if (!m) {
+        console.log(red("usage: /stratlog <concept> <strategy> <yes|no>"));
+        console.log(dim(`strategies: ${STRATEGY_NAMES.join(", ")}`));
+      } else {
+        await recordOutcome(vault, m[1].trim(), m[2], m[3] === "yes");
+        console.log(green(`recorded: ${m[2]} on "${m[1].trim()}" -> ${m[3]}`));
+      }
     } else {
-      const store = await loadStrategies(vault);
-      const hint = strategyRotationHint(store[m[1]], m[1]);
-      console.log(hint ?? dim(`no data for "${m[1]}" yet - record outcomes with /stratlog`));
+      const concept = input.slice(6).trim();
+      if (!concept) {
+        console.log(red("usage: /strat <concept> | /stratlog <concept> <strategy> <yes|no>"));
+        console.log(dim(`strategies: ${STRATEGY_NAMES.join(", ")}`));
+      } else {
+        const store = await loadStrategies(vault);
+        const hint = strategyRotationHint(store[concept], concept);
+        console.log(hint ?? dim(`no data for "${concept}" yet - record outcomes with /stratlog`));
+      }
     }
     continue;
   }
@@ -388,19 +433,26 @@ while (true) {
       continue;
     }
     // ponytail: grading stays conversational, this just records the result
-    const m = /^\/logexam\s+(\S+)\s+(\d+)\s*\/\s*(\d+)$/.exec(input);
+    const m = /^\/logexam\s+(.+?)\s+(\d+)\s*\/\s*(\d+)$/.exec(input);
     if (!m || +m[3] < 1 || +m[2] > +m[3]) {
       console.log(red("usage: /logexam <topic> <correct>/<total>"));
     } else {
-      await recordExamResult(vault, { topic: m[1], correct: +m[2], total: +m[3], date: new Date().toISOString() });
-      console.log(green(`logged ${m[2]}/${m[3]} for ${m[1]}`));
+      const topic = m[1].trim();
+      await recordExamResult(vault, { topic, correct: +m[2], total: +m[3], date: new Date().toISOString() });
+      // an exam result is hard evidence - the learner model wants exactly this
+      await updateMastery(vault, "exam", topic, { mastery: +m[2] / +m[3], confidence: 0.8 }, `exam ${m[2]}/${m[3]}`).catch(() => {});
+      console.log(green(`logged ${m[2]}/${m[3]} for ${topic}`));
     }
     continue;
   }
   process.stdout.write(cyan("minerva > "));
+  let reply = "";
   try {
     for await (const ev of runTurn(adapter, session, history, input, tools, { system, model: currentModel })) {
-      if (ev.type === "text_delta") process.stdout.write(ev.text);
+      if (ev.type === "text_delta") {
+        reply += ev.text;
+        process.stdout.write(ev.text);
+      }
       else if (ev.type === "tool_start") console.log(dim(`\n[tool] ${ev.call.name}(${ev.call.args.slice(0, 80)})`));
       else {
         history.push(...ev.newMessages);
@@ -415,6 +467,11 @@ while (true) {
     // recovery ladder: an API error must not kill the session
     // (history stays consistent - only completed messages were pushed)
     console.log(red(`\n[error] ${err instanceof Error ? err.message : err}`));
+  }
+  // Feeds /retrospect. Best effort: a failing log must never break the session.
+  if (vault && reply) {
+    const skillTag = activeSkill ? `[${activeSkill}] ` : "";
+    await recordSessionLog(vault, `${skillTag}${input.slice(0, 200)} -> ${reply.slice(0, 300)}`).catch(() => {});
   }
 }
 tui.close();

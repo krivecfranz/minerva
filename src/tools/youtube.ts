@@ -157,7 +157,11 @@ const youtubeTranscript = defineTool({
         60_000,
       );
 
-      const files = (await readdir(dir)).filter((f) => f.endsWith(".vtt"));
+      // ponytail: readdir order is unspecified and both manual and auto subs can be
+      // present - prefer manual, then sort so the pick is at least deterministic.
+      const files = (await readdir(dir))
+        .filter((f) => f.endsWith(".vtt"))
+        .sort((a, b) => Number(a.includes("auto")) - Number(b.includes("auto")) || a.localeCompare(b));
       if (!files.length) {
         return {
           content:
